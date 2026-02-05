@@ -2,6 +2,7 @@ package utils
 
 import (
 	"net"
+	"os"
 	"sort"
 	"testing"
 	"time"
@@ -262,5 +263,311 @@ func TestNoOutput(t *testing.T) {
 				t.Errorf("noOutput() = %v, expected %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestExportCsv_SkipEmptyData 测试空数据时跳过导出
+func TestExportCsv_SkipEmptyData(t *testing.T) {
+	tests := []struct {
+		name string
+		data []CloudflareIPData
+	}{
+		{"空切片", []CloudflareIPData{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			originalOutput := Output
+			Output = "test_output.csv"
+			defer func() {
+				Output = originalOutput
+				os.Remove("test_output.csv")
+			}()
+
+			// 不应该 panic 且不应该创建文件
+			ExportCsv(tt.data)
+		})
+	}
+}
+
+// TestFilterDelay_DefaultRange 测试默认延迟范围不过滤
+func TestFilterDelay_DefaultRange(t *testing.T) {
+	ip1 := net.ParseIP("1.1.1.1")
+	ip2 := net.ParseIP("2.2.2.2")
+
+	originalMaxDelay := InputMaxDelay
+	originalMinDelay := InputMinDelay
+	defer func() {
+		InputMaxDelay = originalMaxDelay
+		InputMinDelay = originalMinDelay
+	}()
+
+	// 使用默认范围
+	InputMaxDelay = 9999 * time.Millisecond
+	InputMinDelay = 0
+
+	data := PingDelaySet{
+		{PingData: &PingData{IP: &net.IPAddr{IP: ip1}, Delay: 50 * time.Millisecond}},
+		{PingData: &PingData{IP: &net.IPAddr{IP: ip2}, Delay: 500 * time.Millisecond}},
+	}
+
+	filtered := data.FilterDelay()
+
+	// 默认范围应该返回所有数据
+	if len(filtered) != 2 {
+		t.Errorf("expected 2 results with default range, got %d", len(filtered))
+	}
+}
+
+// TestFilterLossRate_DefaultRate 测试默认丢包率不过滤
+func TestFilterLossRate_DefaultRate(t *testing.T) {
+	ip1 := net.ParseIP("1.1.1.1")
+	ip2 := net.ParseIP("2.2.2.2")
+
+	originalMaxLossRate := InputMaxLossRate
+	defer func() {
+		InputMaxLossRate = originalMaxLossRate
+	}()
+
+	// 使用默认最大丢包率
+	InputMaxLossRate = 1.0
+
+	data := PingDelaySet{
+		{PingData: &PingData{IP: &net.IPAddr{IP: ip1}, Sended: 4, Received: 4}}, // 0% 丢包
+		{PingData: &PingData{IP: &net.IPAddr{IP: ip2}, Sended: 4, Received: 0}}, // 100% 丢包
+	}
+
+	filtered := data.FilterLossRate()
+
+	// 默认丢包率应该返回所有数据
+	if len(filtered) != 2 {
+		t.Errorf("expected 2 results with default loss rate, got %d", len(filtered))
+	}
+}
+
+// TestPingData_LossRateCaching 测试丢包率缓存功能
+func TestPingData_LossRateCaching(t *testing.T) {
+	data := &CloudflareIPData{
+		PingData: &PingData{
+			Sended:   4,
+			Received: 3,
+		},
+	}
+
+	// 第一次计算
+	rate1 := data.getLossRate()
+	// 第二次计算应该使用缓存
+	rate2 := data.getLossRate()
+
+	if rate1 != rate2 {
+		t.Errorf("loss rate should be cached, got %v and %v", rate1, rate2)
+	}
+}
+
+// TestPingDelaySet_Sort_EqualLossRate 测试丢包率相同时按延迟排序
+func TestPingDelaySet_Sort_EqualLossRate(t *testing.T) {
+	ip1 := net.ParseIP("1.1.1.1")
+	ip2 := net.ParseIP("2.2.2.2")
+	ip3 := net.ParseIP("3.3.3.3")
+
+	data := PingDelaySet{
+		{PingData: &PingData{IP: &net.IPAddr{IP: ip3}, Sended: 4, Received: 2, Delay: 100 * time.Millisecond}}, // 50% 丢包
+		{PingData: &PingData{IP: &net.IPAddr{IP: ip1}, Sended: 4, Received: 2, Delay: 50 * time.Millisecond}},  // 50% 丢包，延迟更低
+		{PingData: &PingData{IP: &net.IPAddr{IP: ip2}, Sended: 4, Received: 2, Delay: 200 * time.Millisecond}}, // 50% 丢包，延迟更高
+	}
+
+	sort.Sort(data)
+
+	// 丢包率相同时，延迟低的应该在前面
+	if data[0].PingData.IP.String() != "1.1.1.1" {
+		t.Errorf("expected 1.1.1.1 first (same loss rate, lower delay), got %s", data[0].PingData.IP.String())
+	}
+	if data[1].PingData.IP.String() != "3.3.3.3" {
+		t.Errorf("expected 3.3.3.3 second (same loss rate, medium delay), got %s", data[1].PingData.IP.String())
+	}
+	if data[2].PingData.IP.String() != "2.2.2.2" {
+		t.Errorf("expected 2.2.2.2 third (same loss rate, higher delay), got %s", data[2].PingData.IP.String())
+	}
+}
+
+// TestFilterDelay_OutOfOrder 测试乱序数据的延迟过滤
+func TestFilterDelay_OutOfOrder(t *testing.T) {
+	ip1 := net.ParseIP("1.1.1.1")
+	ip2 := net.ParseIP("2.2.2.2")
+	ip3 := net.ParseIP("3.3.3.3")
+	ip4 := net.ParseIP("4.4.4.4")
+
+	originalMaxDelay := InputMaxDelay
+	originalMinDelay := InputMinDelay
+	defer func() {
+		InputMaxDelay = originalMaxDelay
+		InputMinDelay = originalMinDelay
+	}()
+
+	InputMaxDelay = 200 * time.Millisecond
+	InputMinDelay = 50 * time.Millisecond
+
+	// 先按延迟排序的数据
+	data := PingDelaySet{
+		{PingData: &PingData{IP: &net.IPAddr{IP: ip1}, Delay: 100 * time.Millisecond}}, // 符合
+		{PingData: &PingData{IP: &net.IPAddr{IP: ip2}, Delay: 150 * time.Millisecond}}, // 符合
+		{PingData: &PingData{IP: &net.IPAddr{IP: ip3}, Delay: 300 * time.Millisecond}}, // 超范围（后续都不符合）
+		{PingData: &PingData{IP: &net.IPAddr{IP: ip4}, Delay: 400 * time.Millisecond}}, // 不会被处理
+	}
+
+	filtered := data.FilterDelay()
+
+	// FilterDelay 会在遇到超范围值后停止，所以只有前2个
+	if len(filtered) != 2 {
+		t.Errorf("expected 2 results (stop at out of range), got %d", len(filtered))
+	}
+	// 验证过滤后的顺序
+	if filtered[0].PingData.IP.String() != "1.1.1.1" {
+		t.Errorf("expected 1.1.1.1 first, got %s", filtered[0].PingData.IP.String())
+	}
+	if filtered[1].PingData.IP.String() != "2.2.2.2" {
+		t.Errorf("expected 2.2.2.2 second, got %s", filtered[1].PingData.IP.String())
+	}
+}
+
+// TestDownloadSpeedSet_SingleElement 测试单元素下载速度集排序
+func TestDownloadSpeedSet_SingleElement(t *testing.T) {
+	ip1 := net.ParseIP("1.1.1.1")
+
+	data := DownloadSpeedSet{
+		{PingData: &PingData{IP: &net.IPAddr{IP: ip1}}, DownloadSpeed: 100},
+	}
+
+	sort.Sort(data)
+
+	if data[0].PingData.IP.String() != "1.1.1.1" {
+		t.Errorf("expected 1.1.1.1, got %s", data[0].PingData.IP.String())
+	}
+}
+
+// TestDownloadSpeedSet_EqualSpeed 测试下载速度相同时的排序稳定性
+func TestDownloadSpeedSet_EqualSpeed(t *testing.T) {
+	ip1 := net.ParseIP("1.1.1.1")
+	ip2 := net.ParseIP("2.2.2.2")
+
+	data := DownloadSpeedSet{
+		{PingData: &PingData{IP: &net.IPAddr{IP: ip2}}, DownloadSpeed: 50},
+		{PingData: &PingData{IP: &net.IPAddr{IP: ip1}}, DownloadSpeed: 50},
+	}
+
+	sort.Sort(data)
+
+	// 速度相同时，保持原顺序
+	if data[0].PingData.IP.String() != "2.2.2.2" {
+		t.Errorf("expected 2.2.2.2 first (stable sort), got %s", data[0].PingData.IP.String())
+	}
+}
+
+// TestPingData_toString_SpeedFormat 测试下载速度格式
+func TestPingData_toString_SpeedFormat(t *testing.T) {
+	ip := net.ParseIP("1.1.1.1")
+
+	tests := []struct {
+		name           string
+		speed          float64
+		expectedFormat string
+	}{
+		{"1 MB/s", 1 * 1024 * 1024, "1.00"},
+		{"10 MB/s", 10 * 1024 * 1024, "10.00"},
+		{"0.5 MB/s", 0.5 * 1024 * 1024, "0.50"},
+		{"零速度", 0, "0.00"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := &CloudflareIPData{
+				PingData: &PingData{
+					IP:       &net.IPAddr{IP: ip},
+					Sended:   4,
+					Received: 4,
+					Delay:    100 * time.Millisecond,
+				},
+				DownloadSpeed: tt.speed,
+			}
+
+			result := data.toString()
+
+			if result[5] != tt.expectedFormat {
+				t.Errorf("expected speed format %s, got %s", tt.expectedFormat, result[5])
+			}
+		})
+	}
+}
+
+// TestConvertToString 测试数据转换为字符串切片
+func TestConvertToString(t *testing.T) {
+	ip1 := net.ParseIP("1.1.1.1")
+	ip2 := net.ParseIP("2.2.2.2")
+
+	data := []CloudflareIPData{
+		{
+			PingData: &PingData{
+				IP:       &net.IPAddr{IP: ip1},
+				Sended:   4,
+				Received: 4,
+				Delay:    100 * time.Millisecond,
+			},
+			DownloadSpeed: 10 * 1024 * 1024,
+		},
+		{
+			PingData: &PingData{
+				IP:       &net.IPAddr{IP: ip2},
+				Sended:   4,
+				Received: 2,
+				Delay:    200 * time.Millisecond,
+			},
+			DownloadSpeed: 5 * 1024 * 1024,
+		},
+	}
+
+	result := convertToString(data)
+
+	if len(result) != 2 {
+		t.Errorf("expected 2 rows, got %d", len(result))
+	}
+	if len(result[0]) != 7 {
+		t.Errorf("expected 7 columns, got %d", len(result[0]))
+	}
+	if result[0][0] != "1.1.1.1" {
+		t.Errorf("expected first IP 1.1.1.1, got %s", result[0][0])
+	}
+	if result[1][0] != "2.2.2.2" {
+		t.Errorf("expected second IP 2.2.2.2, got %s", result[1][0])
+	}
+}
+
+// TestFilterDelay_ExactBoundary 测试延迟边界值过滤
+func TestFilterDelay_ExactBoundary(t *testing.T) {
+	ip1 := net.ParseIP("1.1.1.1")
+	ip2 := net.ParseIP("2.2.2.2")
+	ip3 := net.ParseIP("3.3.3.3")
+
+	originalMaxDelay := InputMaxDelay
+	originalMinDelay := InputMinDelay
+	defer func() {
+		InputMaxDelay = originalMaxDelay
+		InputMinDelay = originalMinDelay
+	}()
+
+	// 精确边界测试
+	InputMaxDelay = 200 * time.Millisecond
+	InputMinDelay = 100 * time.Millisecond
+
+	data := PingDelaySet{
+		{PingData: &PingData{IP: &net.IPAddr{IP: ip1}, Delay: 100 * time.Millisecond}}, // 等于最小值
+		{PingData: &PingData{IP: &net.IPAddr{IP: ip2}, Delay: 200 * time.Millisecond}}, // 等于最大值
+		{PingData: &PingData{IP: &net.IPAddr{IP: ip3}, Delay: 50 * time.Millisecond}},  // 小于最小值
+	}
+
+	filtered := data.FilterDelay()
+
+	// 边界值应该被包含
+	if len(filtered) != 2 {
+		t.Errorf("expected 2 results (boundary values included), got %d", len(filtered))
 	}
 }

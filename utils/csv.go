@@ -100,65 +100,67 @@ func convertToString(data []CloudflareIPData) [][]string {
 	return result
 }
 
-// 延迟丢包排序
+// PingDelaySet 按丢包率、延迟排序的 IP 数据集
 type PingDelaySet []CloudflareIPData
 
-// 延迟条件过滤
+// FilterDelay 按延迟条件过滤 IP
 func (s PingDelaySet) FilterDelay() (data PingDelaySet) {
-	if InputMaxDelay > maxDelay || InputMinDelay < minDelay { // 当输入的延迟条件不在默认范围内时，不进行过滤
+	if InputMaxDelay > maxDelay || InputMinDelay < minDelay {
 		return s
 	}
-	if InputMaxDelay == maxDelay && InputMinDelay == minDelay { // 当输入的延迟条件为默认值时，不进行过滤
+	if InputMaxDelay == maxDelay && InputMinDelay == minDelay {
 		return s
 	}
 	for _, v := range s {
-		if v.Delay > InputMaxDelay { // 平均延迟上限，延迟大于条件最大值时，后面的数据都不满足条件，直接跳出循环
-			break
+		if v.Delay > InputMaxDelay {
+			break // 超出上限，后面的也都不满足
 		}
-		if v.Delay < InputMinDelay { // 平均延迟下限，延迟小于条件最小值时，不满足条件，跳过
-			continue
+		if v.Delay < InputMinDelay {
+			continue // 低于下限，跳过
 		}
-		data = append(data, v) // 延迟满足条件时，添加到新数组中
+		data = append(data, v)
 	}
 	return
 }
 
-// 丢包条件过滤
+// FilterLossRate 按丢包率条件过滤 IP
 func (s PingDelaySet) FilterLossRate() (data PingDelaySet) {
-	if InputMaxLossRate >= maxLossRate { // 当输入的丢包条件为默认值时，不进行过滤
+	if InputMaxLossRate >= maxLossRate {
 		return s
 	}
 	for _, v := range s {
-		if v.getLossRate() > InputMaxLossRate { // 丢包几率上限
-			break
+		if v.getLossRate() > InputMaxLossRate {
+			break // 超出上限，后面的也都不满足
 		}
-		data = append(data, v) // 丢包率满足条件时，添加到新数组中
+		data = append(data, v)
 	}
 	return
 }
 
+// 实现 sort.Interface 接口
 func (s PingDelaySet) Len() int {
 	return len(s)
 }
 func (s PingDelaySet) Less(i, j int) bool {
 	iRate, jRate := s[i].getLossRate(), s[j].getLossRate()
 	if iRate != jRate {
-		return iRate < jRate
+		return iRate < jRate // 丢包率低的优先
 	}
-	return s[i].Delay < s[j].Delay
+	return s[i].Delay < s[j].Delay // 延迟低的优先
 }
 func (s PingDelaySet) Swap(i, j int) {
 	s[i], s[j] = s[j], s[i]
 }
 
-// 下载速度排序
+// DownloadSpeedSet 按下载速度排序的 IP 数据集
 type DownloadSpeedSet []CloudflareIPData
 
+// 实现 sort.Interface 接口
 func (s DownloadSpeedSet) Len() int {
 	return len(s)
 }
 func (s DownloadSpeedSet) Less(i, j int) bool {
-	return s[i].DownloadSpeed > s[j].DownloadSpeed
+	return s[i].DownloadSpeed > s[j].DownloadSpeed // 速度高的优先
 }
 func (s DownloadSpeedSet) Swap(i, j int) {
 	s[i], s[j] = s[j], s[i]
@@ -168,17 +170,18 @@ func (s DownloadSpeedSet) Print() {
 	if NoPrintResult() {
 		return
 	}
-	if len(s) <= 0 { // IP数组长度(IP数量) 大于 0 时继续
+	if len(s) <= 0 {
 		fmt.Println("\n[信息] 完整测速结果 IP 数量为 0，跳过输出结果。")
 		return
 	}
-	dateString := convertToString(s) // 转为多维数组 [][]String
-	if len(dateString) < PrintNum {  // 如果IP数组长度(IP数量) 小于  打印次数，则次数改为IP数量
+	dateString := convertToString(s)
+	if len(dateString) < PrintNum {
 		PrintNum = len(dateString)
 	}
 	headFormat := "%-16s%-5s%-5s%-5s%-6s%-12s%-5s\n"
 	dataFormat := "%-18s%-8s%-8s%-8s%-10s%-16s%-8s\n"
-	for i := 0; i < PrintNum; i++ { // 如果要输出的 IP 中包含 IPv6，那么就需要调整一下间隔
+	// IPv6 地址较长时调整格式
+	for i := 0; i < PrintNum; i++ {
 		if len(dateString[i][0]) > 15 {
 			headFormat = "%-40s%-5s%-5s%-5s%-6s%-12s%-5s\n"
 			dataFormat = "%-42s%-8s%-8s%-8s%-10s%-16s%-8s\n"

@@ -130,8 +130,9 @@ https://github.com/XIU2/CloudflareSpeedTest
 	}
 }
 
+// 主入口
 func main() {
-	task.InitRandSeed() // 置随机数种子
+	task.InitRandSeed() // 初始化随机数种子
 
 	fmt.Printf("# XIU2/CloudflareSpeedTest %s \n\n", version)
 
